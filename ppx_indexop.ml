@@ -3,7 +3,12 @@ open Ast_helper
 open Asttypes
 open Parsetree
 
-let make_module loc name items =
+let extract_loc = function
+  | a::q -> a.pstr_loc
+  | _ -> assert false
+       
+let make_module name items =
+  let loc = extract_loc items in
   items
   |>  Mod.structure ~loc 
   |>  Mb.mk ~loc {txt=name;loc}
@@ -89,8 +94,8 @@ let kind_to_string = function
   | String -> "String"
   | Bigarray -> "Bigarray"
        
-let encapsulate_simple kind loc pstr =
-  pstr |> make_module loc (kind_to_string kind)
+let encapsulate_simple kind pstr =
+  make_module (kind_to_string kind) pstr
 
 let bigarray_submodule = function
   | Finite 1 -> "Array1"
@@ -99,13 +104,12 @@ let bigarray_submodule = function
   | Arbitrary -> "Genarray"
   | _ -> assert false
 		      
-let encapsulate_bigarray loc updater binding_map =
-  let add_submodule arity bindings acc =
-    let pstr = updater bindings in
-    let sub  = make_module pstr.pstr_loc (bigarray_submodule arity) [pstr] in
+let encapsulate_bigarray str_map =
+  let add_submodule arity pstr acc =
+    let sub  = make_module (bigarray_submodule arity) pstr in
     sub::acc in
-  let submodules = ArityMap.( fold add_submodule binding_map [] ) in
-  make_module loc "Bigarray" submodules
+  let submodules = ArityMap.( fold add_submodule str_map [] ) in
+  make_module "Bigarray" submodules
 		
 
 type version = { major:int; minor:int }
@@ -120,46 +124,76 @@ let ocaml_version =
   let minor = int_of_string @@ String.sub s (succ dot1) (dot2-dot1-1) in
   {major;minor}
 
+    
 let update_binding str_item rec_flag  b =
   { str_item with pstr_desc = Pstr_value(rec_flag, b ) }
 
-let rewrite_str_ante kind updater bindings=
+
+let split_str =  function
+  | { pstr_loc; pstr_desc= Pstr_value (rec_flag, bindings )  } as str_item ->
+     update_binding str_item rec_flag, bindings
+  | _  -> assert false
+     
+    
+let rewrite_str_item_ante kind str_item=
+  let updater, bindings = split_str str_item in
   let full_bindings = List.fold_left ( fun l x ->  (with_binding duplicate_unsafe x)::l ) bindings bindings in
   let str_item = updater full_bindings in
-  encapsulate_simple kind str_item.pstr_loc [ str_item ]
-  
+  str_item
+	
+let rewrite_str_ante kind str =
+  let str = List.map (rewrite_str_item_ante kind) str in
+  encapsulate_simple kind str
 
-let rewrite_str_bigarray kind loc updater bindings=
-  let arity_map = ArityMap.empty in
-  let folder arity_map b = with_binding (register_binding arity_map) b in
-  let arity_map = List.fold_left folder arity_map bindings in
-  encapsulate_bigarray loc updater arity_map
-			  
-let rewrite_str_item kind = function
-  | { pstr_loc; pstr_desc= Pstr_value (rec_flag, bindings )  } as str_item ->
-     let updater = update_binding str_item rec_flag in
-     if ocaml_version <% impl then
-       match kind with
-       | Bigarray -> rewrite_str_bigarray kind pstr_loc updater bindings
-       | s -> rewrite_str_ante kind updater bindings 
-     else
-     let bindings=  List.map ( with_binding ( rewrite_binding @@ translate_indexop kind ) ) bindings in 
-     {pstr_loc; pstr_desc = Pstr_value(rec_flag, bindings)}  
-  | _ -> assert false 					       							       
 
-let rewrite_str kind  = function
-  | [str_item] -> rewrite_str_item kind str_item
-  | _ -> assert false 
-				      
+let rewrite_str_item_bigarray str_map str_item=
+  let updater, bindings = split_str str_item in
+  let folder binding_map b = with_binding (register_binding binding_map) b in
+  let binding_map =
+    bindings
+    |> List.fold_left folder ArityMap.empty 
+    |> ArityMap.map updater in
+  let folder' arity item str_map =
+    ArityMap.( str_map <+ (arity,[item]) ) in
+  ArityMap.fold folder' binding_map str_map 
+		  
+		
+let rewrite_str_bigarray str =
+  str
+  |> List.fold_left rewrite_str_item_bigarray ArityMap.empty 
+  |> encapsulate_bigarray
+
+let rewrite_str_post kind str=
+  let rewrite_item str_item =
+    let updater, bindings = split_str str_item in
+    bindings
+    |> List.map (with_binding (rewrite_binding @@ translate_indexop kind) )
+    |> updater
+  in
+  List.map rewrite_item str
+
+let select global_str kind str =
+  if ocaml_version <% impl then
+    match kind with
+    | Bigarray -> (rewrite_str_bigarray str)::global_str 
+    | kind -> (rewrite_str_ante kind str)::global_str 
+  else
+    (rewrite_str_post kind str) @ global_str
+		     
+
+let structure_fold mapper str = function
+  | { pstr_desc = Pstr_extension ( ({txt="indexop";loc}, PStr pstr) , l  ) } -> select str Bigarray pstr
+  | { pstr_desc = Pstr_extension ( ({txt="indexop.arraylike";loc}, PStr pstr) , l  ) } -> select str Array pstr
+  | { pstr_desc = Pstr_extension ( ({txt="indexop.stringlike";loc}, PStr pstr) , l  ) } -> select str String pstr
+  | x -> (default_mapper.structure_item mapper x)::str		     
+			      
 let indexop_mapper argv =  {
   default_mapper with
-  structure_item =(
-    fun mapper -> function
-	       | { pstr_desc = Pstr_extension ( ({txt="indexop";loc}, PStr pstr) , l  ) } -> rewrite_str Bigarray pstr
-	       | { pstr_desc = Pstr_extension ( ({txt="indexop.arraylike";loc}, PStr pstr) , l  ) } -> rewrite_str Array pstr
-	       | { pstr_desc = Pstr_extension ( ({txt="indexop.stringlike";loc}, PStr pstr) , l  ) } -> rewrite_str String pstr
-	       | x -> default_mapper.structure_item mapper x
-)
+  structure = (fun mapper str ->
+	       str
+	       |> List.fold_left (structure_fold mapper) []
+	       |> List.rev
+	 )
 }
 
 let () = register "indexop" indexop_mapper
