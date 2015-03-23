@@ -19,6 +19,10 @@ let extract_loc = function
   | a::q -> a.pstr_loc
   | _ -> assert false
 
+let extract_loc_sig = function
+  | a::q -> a.psig_loc
+  | _ -> assert false
+		
 type ('a,'b) result = Ok of 'a | Error of 'b
 
 let error x = Error x
@@ -39,23 +43,45 @@ let ( ><? ) x f = match x with
   | Error x -> f x
   | Ok y -> Ok y
 
+
+let map_with_errors f l =
+  let rec map acc = function
+    | a::q -> f a >>? fun x -> map (x::acc) q
+    | [] -> ok [] in
+  map [] l
+
+let fold_with_errors f start l =
+  let rec fold acc l=
+    match l with
+    | a::q -> f acc a >>? fun acc -> fold acc q
+    | [] -> ok acc in
+  fold start l
+
 exception Indexop_error of Location.error
 	       
-let localize loc e = match e with
+let localize loc e =
+  let open Location in
+  match e with
   | `Incorrect_structure_item ->
-     raise @@ Indexop_error Location.{
+     raise @@  Location.Error {
        loc;
        msg = "Incorrect structure item in an indexop extension";
        sub=[];
        if_highlight = "This structure item is invalide inside an indexop extension"
-     }
-  | `Unknown_identifiant s -> raise @@ Indexop_error Location.{
+		 }
+  | `Incorrect_sig_item -> raise @@  Location.Error {
+       loc;
+       msg = "Incorrect signature value with an indexop attribute ";
+       sub=[];
+       if_highlight = "This signature value can not be combined with an indexop attribute"
+		 } 
+  | `Unknown_identifiant s -> raise @@ Location.Error{
 				loc;
 				msg = "Incorrect identifiant [" ^ s ^"] in an indexop extension";
 				sub=[];
 				if_highlight = "This identifiant is invalide inside an indexop extension"
 			      }
-  | `Incorrect_arity n -> raise @@ Indexop_error Location.{
+  | `Incorrect_arity n -> raise @@  Location.Error {
 			    loc;
 			    msg = "Incorrect arity [" ^ string_of_int n  ^">3] in an indexop extension";
 			    sub=[];
@@ -73,10 +99,18 @@ let ( ><! ) x loc = match x with
 let make_module name items =
   let loc = extract_loc items in 
   items
-  |>  Mod.structure ~loc 
-  |>  Mb.mk ~loc {txt=name;loc}
+  |> Mod.structure ~loc 
+  |> Mb.mk ~loc {txt=name;loc}
   |> Str.module_  ~loc 
 
+let make_module_sig name items =
+  let loc = extract_loc_sig items in 
+  Pmty_signature items
+  |> Mty.mk ~loc 
+  |> Md.mk ~loc {txt=name;loc}
+  |> Sig.module_  ~loc 
+
+		  
 type array_kind = Array | String | Bigarray
 type arity = Finite of int | Arbitrary
 type operator_kind  = Set | Get
@@ -89,7 +123,15 @@ module ArityMap = struct
     let l = try find x map with Not_found -> [] in 
     add x (y@l) map	 
 end
+
+module Sig_map = struct
+  include( Map.Make(struct type t=array_type let compare=compare end) )
+  let (<+) map (x,y) =
+    let l = try find x map with Not_found -> [] in 
+    add x (y@l) map	 
+end
 			
+		    
 			 
 let ( !! ) n = Finite n
 
@@ -108,21 +150,24 @@ let translate_kind n = function
   | String -> ".[]"
   | Bigarray -> ".{" ^ translate_arity n ^ "}"
 
+let trust_me = function
+  | Ok x -> x
+  | Error x -> assert false
 					     
 let mk_op kind arity = {kind;arity}
-let scan_operator = function
-  | "get" | "get1" -> ok @@ mk_op Get (!!1)
-  | "set" | "set1" -> ok @@ mk_op Set (!!1)
-  | "get2" -> ok @@ mk_op Get ( !!2 )
-  | "set2" -> ok @@ mk_op Set ( !!2 )
-  | "get3" -> ok @@ mk_op Get ( !!3 )
-  | "set3" -> ok @@ mk_op Set ( !! 3 )
-  | "getn" -> ok @@ mk_op Get Arbitrary
-  | "setn" -> ok @@ mk_op Set Arbitrary
-  | s -> error @@ `Unknown_identifiant s
+let scan_operator { txt; loc }  = match txt with 
+  |  "get" | "get_1"  -> mk_op Get (!!1)
+  | "set" | "set_1" -> mk_op Set (!!1)
+  | "get_2" ->  mk_op Get ( !!2 )
+  | "set_2" ->  mk_op Set ( !!2 )
+  | "get_3" ->  mk_op Get ( !!3 )
+  | "set_3" ->  mk_op Set ( !! 3 )
+  | "get_n" ->  mk_op Get Arbitrary
+  | "set_n" ->  mk_op Set Arbitrary
+  | s -> localize loc @@ `Unknown_identifiant s
 
-let translate_indexop kind op_str =
-  scan_operator op_str >|? fun op -> 
+let translate_indexop kind op_name =
+  let op = scan_operator op_name in 
   let n = op.arity in
   let base_name = translate_kind n kind in
   match op.kind with
@@ -132,23 +177,29 @@ let translate_indexop kind op_str =
 			 
 let opkind_to_str  = function
   | Get -> "get"
-  | Set -> "set"	 
+  | Set -> "set"
+
+let op_to_str op = opkind_to_str op.kind
 
 let with_binding f = function
   | {pvb_pat={ ppat_desc= Ppat_var var ; ppat_loc; _ } as pr   ; _ } as b -> f b pr var
-  | {pvb_loc; _}  -> localize pvb_loc `Incorrect_structure_item  
+  | {pvb_loc; _}  -> localize pvb_loc `Incorrect_structure_item
 
-let rewrite_binding rewriter b pr {loc;txt} =
-  let txt = rewriter txt ><! loc in
-     let pvb_pat = { pr with ppat_desc = Ppat_var {loc; txt}  } in 
-     { b with pvb_pat }
+let rewrite_sig f s =
+  let sn = s.pval_name in
+  { s with pval_name = { sn with txt = f sn } }  
+
+let rewrite_binding rewriter b pr sloc =
+  let txt = rewriter sloc in
+  let pvb_pat = { pr with ppat_desc = Ppat_var {txt; loc=sloc.loc} } in 
+  { b with pvb_pat }
 		       
 
 let register_binding  m b pr sloc =
-  let op = scan_operator sloc.txt ><! sloc.loc in 
+  let op = scan_operator sloc in 
   let name = opkind_to_str op.kind in
-  let b' = rewrite_binding (fun _ -> ok name) b pr sloc in 
-  let b'' = rewrite_binding (fun _ -> ok @@ "unsafe_" ^ name ) b pr sloc in
+  let b' = rewrite_binding  (fun _ -> name) b pr sloc in 
+  let b'' = rewrite_binding (fun _ ->  "unsafe_" ^ name ) b pr sloc in
   ArityMap.( m <+ (op.arity, [b';b'']) )
  
 let duplicate_unsafe b pr {loc;txt} =
@@ -171,14 +222,14 @@ let bigarray_submodule = function
   | Finite k -> error @@ `Incorrect_arity k  
 
 
-let encapsulate_bigarray str_map =
+let encapsulate_bigarray make str_map =
   let add_submodule arity pstr acc =
     let loc = extract_loc pstr in
     let sub_typ = bigarray_submodule arity ><! loc in
-    let sub = make_module sub_typ pstr in
+    let sub = make sub_typ pstr in
     sub::acc in
   ArityMap.fold add_submodule str_map ([])
-  |>  make_module "Bigarray"
+  |>  make "Bigarray"
 		
 
 type version = { major:int; minor:int }
@@ -197,12 +248,18 @@ let ocaml_version =
 let update_binding str_item rec_flag  b =
   { str_item with pstr_desc = Pstr_value(rec_flag, b ) }
 
+let update_sig_val sig_item val_desc =
+  { sig_item with psig_desc = Psig_value val_desc }
 
+let split_sig = function
+  | { psig_loc; psig_desc = Psig_value val_desc  } as sig_item -> update_sig_val sig_item, val_desc
+  | {psig_loc; _ } -> localize psig_loc `Incorrect_sig_item
+    
 let split_str =  function
   | { pstr_loc; pstr_desc= Pstr_value (rec_flag, bindings )  } as str_item ->
      (update_binding str_item rec_flag, bindings )
   | {pstr_loc; _} -> localize pstr_loc `Incorrect_structure_item
-     
+
     
 let rewrite_str_item_ante kind str_item=
   let updater, bindings = split_str str_item in
@@ -210,23 +267,11 @@ let rewrite_str_item_ante kind str_item=
   let str_item = updater full_bindings in
   str_item
 
-let map_with_errors f l =
-  let rec map acc = function
-  | a::q -> f a >>? fun x -> map (x::acc) q
-  | [] -> ok [] in
-  map [] l
-    
+
 let rewrite_str_ante kind str =
   str
   |> List.map (rewrite_str_item_ante kind)
   |> encapsulate_simple kind
-
-let fold_with_errors f start l =
-  let rec fold acc l=
-    match l with
-    | a::q -> f acc a >>? fun acc -> fold acc q
-    | [] -> ok acc in
-  fold start l
 
 let rewrite_str_item_bigarray str_map str_item=
   let updater, bindings = split_str str_item in 
@@ -242,22 +287,17 @@ let rewrite_str_item_bigarray str_map str_item=
 let rewrite_str_bigarray str =
   str
   |> List.fold_left rewrite_str_item_bigarray ArityMap.empty 
-  |> encapsulate_bigarray
+  |> encapsulate_bigarray make_module
 
 let rewrite_str_post kind str=
   let rewrite_item str_item =
     let updater, bindings = split_str str_item in
     bindings
-    |> List.map (with_binding (rewrite_binding @@ translate_indexop kind) )
+    |> List.map (with_binding @@ rewrite_binding @@ translate_indexop kind )
     |> updater
   in
   List.map rewrite_item str
 
-
-let catch_error str f =
-  try f str with
-  | Indexop_error e -> { pstr_desc = Pstr_extension (extension_of_error e, []); pstr_loc = e.Location.loc  }::str
-	   
 	   
 let select kind str global_str =
   if ocaml_version <% impl then
@@ -267,21 +307,85 @@ let select kind str global_str =
   else
     (rewrite_str_post kind str) @ global_str
 
-				    
+let extension_type = function
+  | "indexop"|"indexop.bigarraylike" -> Some Bigarray
+  | "indexop.arraylike" -> Some Array
+  | "indexop.stringlike" -> Some String
+  | txt -> None    
 
+let rec find_attribute = function
+    | (name, PStr [])::q -> ( match extension_type name.txt with Some x -> Some x | None ->  find_attribute q )  
+    | a::q -> find_attribute q
+    | [] -> None
+		 
 let structure_fold mapper str = function
-  | { pstr_desc = Pstr_extension ( ({txt="indexop";loc}, PStr pstr) , l  ) } ->  catch_error str @@ select Bigarray pstr
-  | { pstr_desc = Pstr_extension ( ({txt="indexop.arraylike";loc}, PStr pstr) , l  ) } -> catch_error str @@ select Array pstr
-  | { pstr_desc = Pstr_extension ( ({txt="indexop.stringlike";loc}, PStr pstr) , l  ) } -> catch_error str @@ select String pstr
+  | { pstr_desc = Pstr_extension ( ({txt;loc}, PStr pstr) , l  ) } as x ->
+     begin  match extension_type txt with
+	    | Some typ -> select typ pstr str
+	    | None ->  x::str
+     end
   | x -> (default_mapper.structure_item mapper x)::str		     
-			      
+
+
+let ( |>| ) f g x = g ( f x )
+						     
+let extend_sig sig_val =
+  let updater, s_op = split_sig sig_val in
+  let name = scan_operator |>| op_to_str in
+  let op = rewrite_sig name s_op  in
+  let op' = rewrite_sig (fun n -> "unsafe_" ^ name n) s_op in
+  [ updater op; updater op' ]								   
+  
+
+let signature_destruct mapper (indexop_sign, signature)= function
+  | {psig_desc= Psig_value sig_val  ; psig_loc } as sig_item ->
+     begin
+       match find_attribute sig_val.pval_attributes with
+       | Some typ -> let sig_op = scan_operator sig_val.pval_name in Sig_map.( indexop_sign <+ ( { typ; dim=sig_op.arity }, extend_sig sig_item) ) , signature 
+       | None -> indexop_sign, sig_item::signature
+     end
+  | x -> indexop_sign, (default_mapper.signature_item mapper x)::signature
+								   
+let recreate_sig ( op_map, l ) =
+  let folder {typ;dim} signature (big_l,l) = match typ with
+    | Array -> big_l, (make_module_sig "Array" signature)::l
+    | String -> big_l, (make_module_sig "String" signature)::l
+    | Bigarray -> let smod = trust_me @@ bigarray_submodule dim in
+		  (make_module_sig smod signature) ::big_l, l in
+  let big_l, l = Sig_map.fold folder op_map ([] ,l ) in
+  List.rev @@ ( make_module_sig "Bigarray" big_l ) :: l 
+
+let signature_rewrite_ante mapper sig_items =
+  List.fold_left (signature_destruct mapper) (Sig_map.empty, [] ) sig_items
+  |> recreate_sig
+
+
+
+let signature_rewrite_post mapper signature =
+  let map_f = function 
+  | {psig_desc= Psig_value sig_val; psig_loc } as sig_item ->
+     begin
+       match find_attribute sig_val.pval_attributes with
+       | Some typ -> let item = rewrite_sig (translate_indexop typ) sig_val  in { sig_item with psig_desc = Psig_value item } 
+       | None ->  mapper.signature_item mapper sig_item
+     end
+  | x -> mapper.signature_item mapper x in
+  List.map map_f signature
+
+let signature_rewrite =
+  if ocaml_version <% impl then
+    signature_rewrite_ante
+  else
+    signature_rewrite_post
+								   						   
 let indexop_mapper argv =  {
   default_mapper with
   structure = (fun mapper str ->
 	       str
 	       |> List.fold_left (structure_fold mapper) []
 	       |> List.rev
-	 )
+	      ) ;
+  signature = signature_rewrite
 }
 
 let () = register "indexop" indexop_mapper
