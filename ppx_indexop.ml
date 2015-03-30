@@ -192,30 +192,34 @@ let opkind_to_str  = function
 
 let op_to_str op = opkind_to_str op.kind
 
-let with_binding f = function
-  | {pvb_pat={ ppat_desc= Ppat_var var ; ppat_loc; _ } as pr   ; _ } as b -> f b pr var
-  | {pvb_loc; _}  -> localize pvb_loc `Incorrect_structure_item
+let with_binding f ( {pvb_pat;pvb_loc;_ } as b )  = 
+  match pvb_pat.ppat_desc with
+  | Ppat_var var -> 
+     let updater var' = { b with pvb_pat = { pvb_pat with ppat_desc = Ppat_var var' } } in f updater var
+  | Ppat_constraint ( { ppat_desc = Ppat_var var; _ } as inner , ty ) ->
+     let updater var' =
+       let ppat_desc = Ppat_constraint( { inner with ppat_desc = Ppat_var var' } , ty ) in 
+       { b with pvb_pat = { pvb_pat with ppat_desc } } in f updater var
+  | _ -> localize pvb_loc `Incorrect_structure_item 	   
 
 let rewrite_sig f s =
   let sn = s.pval_name in
   { s with pval_name = { sn with txt = f sn } }  
 
-let rewrite_binding rewriter b pr sloc =
+let rewrite_binding rewriter updater sloc =
   let txt = rewriter sloc in
-  let pvb_pat = { pr with ppat_desc = Ppat_var {txt; loc=sloc.loc} } in 
-  { b with pvb_pat }
+  updater { txt; loc = sloc.loc } 
 		       
 
-let register_binding  m b pr sloc =
+let register_binding  m updater sloc =
   let op = scan_operator sloc in 
   let name = opkind_to_str op.kind in
-  let b' = rewrite_binding  (fun _ -> name) b pr sloc in 
-  let b'' = rewrite_binding (fun _ ->  "unsafe_" ^ name ) b pr sloc in
+  let b' = rewrite_binding  (fun _ -> name) updater sloc in 
+  let b'' = rewrite_binding (fun _ ->  "unsafe_" ^ name ) updater sloc in
   ArityMap.( m <+ (op.arity, [b';b'']) )
  
-let duplicate_unsafe b pr {loc;txt} =
-     let pvb_pat = { pr with ppat_desc = Ppat_var {loc; txt = "unsafe_" ^ txt}  } in 
-     { b with pvb_pat }
+let duplicate_unsafe updater {loc;txt} =
+     updater {loc; txt = "unsafe_" ^ txt}
 
 let kind_to_string = function
   | Array -> "Array"
