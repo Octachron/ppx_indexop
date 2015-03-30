@@ -11,10 +11,14 @@ module Opt = struct
   let (>|?) opt f = match opt with
     | Some x -> Some (f x)
     | None -> None
+
+  let (><) opt default = match opt with
+    | None -> default
+    | Some x -> x
 end
 
 
-	       
+(*
 let extract_loc = function
   | a::q -> a.pstr_loc
   | _ -> assert false
@@ -22,7 +26,8 @@ let extract_loc = function
 let extract_loc_sig = function
   | a::q -> a.psig_loc
   | _ -> assert false
-		
+ *)
+
 type ('a,'b) result = Ok of 'a | Error of 'b
 
 let error x = Error x
@@ -36,7 +41,9 @@ let (>|?) opt f = match opt with
   | Ok x -> Ok (f x)
   | Error e -> Error e				    
 
-
+let hd_opt = function
+  | [] -> None
+  | a::q -> Some a
 
 
 let ( ><? ) x f = match x with
@@ -97,14 +104,18 @@ let ( ><! ) x loc = match x with
 		       
 		
 let make_module name items =
-  let loc = extract_loc items in 
+  let open Opt in
+  hd_opt items >|? fun item -> 
+  let loc = item.pstr_loc in 
   items
   |> Mod.structure ~loc 
   |> Mb.mk ~loc {txt=name;loc}
   |> Str.module_  ~loc 
 
 let make_module_sig name items =
-  let loc = extract_loc_sig items in 
+  let open Opt in
+  items |> hd_opt >|? fun item ->
+  let loc = item.psig_loc in 
   Pmty_signature items
   |> Mty.mk ~loc 
   |> Md.mk ~loc {txt=name;loc}
@@ -221,13 +232,18 @@ let bigarray_submodule = function
   | Arbitrary -> ok @@ "Genarray"
   | Finite k -> error @@ `Incorrect_arity k  
 
-
+let (@?) opt l = match opt with
+  | Some x -> x::l
+  | None -> l
+			  
 let encapsulate_bigarray make str_map =
   let add_submodule arity pstr acc =
-    let loc = extract_loc pstr in
-    let sub_typ = bigarray_submodule arity ><! loc in
-    let sub = make sub_typ pstr in
-    sub::acc in
+    match pstr with
+    | [] -> acc
+    | item::items -> 
+       let loc = item.pstr_loc in
+       let sub_typ = bigarray_submodule arity ><! loc in
+       (make sub_typ pstr) @? acc in
   ArityMap.fold add_submodule str_map ([])
   |>  make "Bigarray"
 		
@@ -302,8 +318,8 @@ let rewrite_str_post kind str=
 let select kind str global_str =
   if ocaml_version <% impl then
     match kind with
-    | Bigarray -> (rewrite_str_bigarray str)::global_str 
-    | kind -> (rewrite_str_ante kind str)::global_str 
+    | Bigarray -> (rewrite_str_bigarray str) @? global_str 
+    | kind -> (rewrite_str_ante kind str) @? global_str 
   else
     (rewrite_str_post kind str) @ global_str
 
@@ -348,12 +364,12 @@ let signature_destruct mapper (indexop_sign, signature)= function
 								   
 let recreate_sig ( op_map, l ) =
   let folder {typ;dim} signature (big_l,l) = match typ with
-    | Array -> big_l, (make_module_sig "Array" signature)::l
-    | String -> big_l, (make_module_sig "String" signature)::l
+    | Array -> big_l, (make_module_sig "Array" signature) @? l
+    | String -> big_l, (make_module_sig "String" signature) @? l
     | Bigarray -> let smod = trust_me @@ bigarray_submodule dim in
-		  (make_module_sig smod signature) ::big_l, l in
+		  (make_module_sig smod signature) @? big_l, l in
   let big_l, l = Sig_map.fold folder op_map ([] ,l ) in
-  List.rev @@ ( make_module_sig "Bigarray" big_l ) :: l 
+  List.rev @@ ( make_module_sig "Bigarray" big_l ) @? l 
 
 let signature_rewrite_ante mapper sig_items =
   List.fold_left (signature_destruct mapper) (Sig_map.empty, [] ) sig_items
