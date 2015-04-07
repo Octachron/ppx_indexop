@@ -1,13 +1,10 @@
-CCX=ocamlc -ppx "../ppx_indexop.native"
+ppx_indexop:ppx_indexop.native
+	mv ppx_indexop.native ppx_indexop
 
-all: ppx_indexop.native tests/test
+all: ppx_indexop.native tests/test.native
 
 ppx_indexop.native:ppx_indexop.ml
 	ocamlbuild -pkg compiler-libs.common ppx_indexop.native
 
-tests/test.cmi : tests/test.mli
-	cd tests && ${CCX} test.mli && cd ..
-
-tests/test: tests/test.ml ppx_indexop.native tests/test.cmi
-	cd tests && ${CCX} test.ml -o test && cd ..
-
+tests/test.native:
+	ocamlbuild -cflags -ppx,"ppx_indexop"  tests/test.native

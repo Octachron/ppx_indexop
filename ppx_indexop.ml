@@ -8,61 +8,25 @@ module Opt = struct
     | Some x -> f x
     | None -> None
 
-  let (>|?) opt f = match opt with
+  let (|>?) opt f = match opt with
     | Some x -> Some (f x)
     | None -> None
 
   let (><) opt default = match opt with
     | None -> default
     | Some x -> x
-end
 
-
-(*
-let extract_loc = function
-  | a::q -> a.pstr_loc
-  | _ -> assert false
-
-let extract_loc_sig = function
-  | a::q -> a.psig_loc
-  | _ -> assert false
- *)
-
-type ('a,'b) result = Ok of 'a | Error of 'b
-
-let error x = Error x
-let ok x = Ok x
-
-let (>>?) opt f = match opt with
-  | Ok x -> f x
-  | Error e -> Error e
-		     
-let (>|?) opt f = match opt with
-  | Ok x -> Ok (f x)
-  | Error e -> Error e				    
-
-let hd_opt = function
+  let hd = function
   | [] -> None
   | a::q -> Some a
 
+		 
+let (@?) opt l = match opt with
+  | Some x -> x::l
+  | None -> l
+end
 
-let ( ><? ) x f = match x with
-  | Error x -> f x
-  | Ok y -> Ok y
-
-
-let map_with_errors f l =
-  let rec map acc = function
-    | a::q -> f a >>? fun x -> map (x::acc) q
-    | [] -> ok [] in
-  map [] l
-
-let fold_with_errors f start l =
-  let rec fold acc l=
-    match l with
-    | a::q -> f acc a >>? fun acc -> fold acc q
-    | [] -> ok acc in
-  fold start l
+let (@?) opt l = Opt.( opt @? l )
 
 exception Indexop_error of Location.error
 	       
@@ -94,18 +58,10 @@ let localize loc e =
 			    sub=[];
 			    if_highlight = "This identifiant has a fixed arity (n>3), which is invalid inside an indexop extension"
 			  }
- 
-			  
-let ( ><! ) x loc = match x with
-  | Error x -> localize loc x
-  | Ok y -> y
-
-
-		       
-		
+ 		
 let make_module name items =
   let open Opt in
-  hd_opt items >|? fun item -> 
+  hd items |>? fun item -> 
   let loc = item.pstr_loc in 
   items
   |> Mod.structure ~loc 
@@ -114,7 +70,7 @@ let make_module name items =
 
 let make_module_sig name items =
   let open Opt in
-  items |> hd_opt >|? fun item ->
+  items |> hd |>? fun item ->
   let loc = item.psig_loc in 
   Pmty_signature items
   |> Mty.mk ~loc 
@@ -160,10 +116,6 @@ let translate_kind n = function
   | Array -> ".()"
   | String -> ".[]"
   | Bigarray -> ".{" ^ translate_arity n ^ "}"
-
-let trust_me = function
-  | Ok x -> x
-  | Error x -> assert false
 					     
 let mk_op kind arity = {kind;arity}
 let scan_operator { txt; loc }  = match txt with 
@@ -229,16 +181,13 @@ let kind_to_string = function
 let encapsulate_simple kind pstr =
   make_module (kind_to_string kind) pstr
 
-let bigarray_submodule = function
-  | Finite 1 -> ok @@ "Array1"
-  | Finite 2 -> ok @@ "Array2"
-  | Finite 3 -> ok @@ "Array3"
-  | Arbitrary -> ok @@ "Genarray"
+let bigarray_submodule error  = function
+  | Finite 1 ->  "Array1"
+  | Finite 2 ->  "Array2"
+  | Finite 3 ->  "Array3"
+  | Arbitrary -> "Genarray"
   | Finite k -> error @@ `Incorrect_arity k  
 
-let (@?) opt l = match opt with
-  | Some x -> x::l
-  | None -> l
 			  
 let encapsulate_bigarray make str_map =
   let add_submodule arity pstr acc =
@@ -246,7 +195,7 @@ let encapsulate_bigarray make str_map =
     | [] -> acc
     | item::items -> 
        let loc = item.pstr_loc in
-       let sub_typ = bigarray_submodule arity ><! loc in
+       let sub_typ = bigarray_submodule (localize loc) arity  in
        (make sub_typ pstr) @? acc in
   ArityMap.fold add_submodule str_map ([])
   |>  make "Bigarray"
@@ -361,7 +310,8 @@ let signature_destruct mapper (indexop_sign, signature)= function
   | {psig_desc= Psig_value sig_val  ; psig_loc } as sig_item ->
      begin
        match find_attribute sig_val.pval_attributes with
-       | Some typ -> let sig_op = scan_operator sig_val.pval_name in Sig_map.( indexop_sign <+ ( { typ; dim=sig_op.arity }, extend_sig sig_item) ) , signature 
+       | Some typ -> let sig_op = scan_operator sig_val.pval_name in
+		     Sig_map.( indexop_sign <+ ( { typ; dim=sig_op.arity }, extend_sig sig_item) ) , signature 
        | None -> indexop_sign, sig_item::signature
      end
   | x -> indexop_sign, (default_mapper.signature_item mapper x)::signature
@@ -370,7 +320,7 @@ let recreate_sig ( op_map, l ) =
   let folder {typ;dim} signature (big_l,l) = match typ with
     | Array -> big_l, (make_module_sig "Array" signature) @? l
     | String -> big_l, (make_module_sig "String" signature) @? l
-    | Bigarray -> let smod = trust_me @@ bigarray_submodule dim in
+    | Bigarray -> let smod = bigarray_submodule (fun _ -> assert false) dim in
 		  (make_module_sig smod signature) @? big_l, l in
   let big_l, l = Sig_map.fold folder op_map ([] ,l ) in
   List.rev @@ ( make_module_sig "Bigarray" big_l ) @? l 
