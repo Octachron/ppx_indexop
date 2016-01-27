@@ -129,7 +129,7 @@ let scan_operator { txt; loc }  = match txt with
   | s -> localize loc @@ `Unknown_identifiant s
 
 let translate_indexop kind op_name =
-  let op = scan_operator op_name in 
+  let op = scan_operator op_name in
   let n = op.arity in
   let base_name = translate_kind n kind in
   match op.kind with
@@ -200,8 +200,11 @@ let encapsulate_bigarray make str_map =
 
 
 type version = { major:int; minor:int }
-let ( <% ) {major;minor} v = if major < v.major then true else minor < v.minor
-let impl = {major=4; minor=3}
+type prediction = Unknown | Version of version
+let ( %<% ) {major;minor} p = match p with
+  | Unknown -> true
+  | Version v ->  major < v.major || minor < v.minor
+let prediction = Unknown
 let ocaml_version =
   let s = Sys.ocaml_version in
   let dot1 = String.index s '.' in
@@ -263,7 +266,7 @@ let rewrite_str_post kind str=
 
 
 let select kind str global_str =
-  if ocaml_version <% impl then
+  if ocaml_version %<% prediction then
     match kind with
     | Bigarray -> (rewrite_str_bigarray str) @? global_str
     | kind -> (rewrite_str_ante kind str) @? global_str
@@ -336,7 +339,7 @@ let signature_rewrite_post mapper signature =
   List.map map_f signature
 
 let signature_rewrite =
-  if ocaml_version <% impl then
+  if ocaml_version %<% prediction then
     signature_rewrite_ante
   else
     signature_rewrite_post

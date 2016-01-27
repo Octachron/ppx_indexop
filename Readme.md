@@ -19,7 +19,7 @@ val get : ('a,'b) Hastbl -> 'a -> 'b [@@indexop]
 val set : ('a,'b) Hastbl -> 'a -> 'b -> unit [@@indexop]
 ```
 
-In ocaml 4.02 mode, ppx_indexop has two majors limitations. First, index operator definitions mask the equivalent standard modules.
+In vanilla ocaml mode, ppx_indexop has two majors limitations. First, index operator definitions mask the equivalent standard modules.
 In other words,
 ```Ocaml
 let%indexop.arraylike get a x = ...
